@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import pickle
+import sys
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Optional
@@ -23,6 +24,7 @@ from typing import Optional
 import networkx as nx
 import pandas as pd
 
+from src.core.memory import release_freed_memory
 from src.config import (
     GRAPH_HOP_DEPTH,
     KG_EXCLUDED_RELATIONS,
@@ -39,6 +41,60 @@ logger = logging.getLogger(__name__)
 # module is first imported, so a module-level .exists() check would freeze
 # on the wrong path.
 _PICKLE_PATH: Path = PROCESSED_DATA_DIR / "primekg_graph.gpickle"
+
+# Columns the graph actually uses. PrimeKG also ships x_id/x_source/y_id/
+# y_source; reading them only to drop them cost ~2 GB of host RAM.
+_KG_STR_COLS = ("relation", "display_relation", "x_name", "y_name", "x_type", "y_type")
+_KG_COLS = _KG_STR_COLS + ("x_index", "y_index")
+
+
+# Memory helpers (host RAM on Kaggle is the binding constraint)
+
+def shared_str_list(series: "pd.Series") -> list[str]:
+    """``series.astype(str).tolist()`` where equal values are ONE object.
+
+    PrimeKG repeats a few dozen relation/type strings across millions of
+    rows; materialising one str object per row wasted gigabytes. Values are
+    identical to ``astype(str)`` (missing -> ``'nan'``), so nothing
+    downstream changes.
+    """
+    cat = series if isinstance(series.dtype, pd.CategoricalDtype) else series.astype("category")
+    cats = [str(c) for c in cat.cat.categories]
+    missing = str(float("nan"))
+    return [cats[c] if c >= 0 else missing for c in cat.cat.codes.tolist()]
+
+
+def compact_graph(G: nx.MultiDiGraph) -> int:
+    """Share identical edge-attribute dicts in place; returns #unique dicts.
+
+    Every PrimeKG edge carries only {relation, display_relation}, so ~5M
+    per-edge dicts collapse to a few dozen shared ones (~1 GB). Safe because
+    nothing mutates edge data after the build (``subgraph().copy()`` and
+    ``G.copy()`` copy the dicts). Also re-interns node attribute strings.
+    Applied after the build AND after loading an older pickle.
+    """
+    shared: dict[tuple, dict] = {}
+    for nbrs in G._succ.values():  # MultiDiGraph: _pred shares these keydicts
+        for keydict in nbrs.values():
+            for k, dd in keydict.items():
+                if dd and len(dd) <= 2 and set(dd) <= {"relation", "display_relation"}:
+                    sig = (dd.get("relation"), dd.get("display_relation"), len(dd))
+                    keydict[k] = shared.setdefault(sig, dd)
+    for _, nd in G.nodes(data=True):
+        for key in ("name", "node_type"):
+            val = nd.get(key)
+            if type(val) is str:
+                nd[key] = sys.intern(val)
+    return len(shared)
+
+
+def neighbors_from_graph(G: nx.MultiDiGraph) -> dict[int, list[tuple[int, str]]]:
+    """node -> [(neighbor, relation)] for every edge touching the node."""
+    n2nb: dict[int, list[tuple[int, str]]] = defaultdict(list)
+    for u, v, rel in G.edges(data="relation"):
+        n2nb[u].append((v, rel))
+        n2nb[v].append((u, rel))
+    return dict(n2nb)
 
 
 def _resolve_csv_path() -> Path:
@@ -72,7 +128,14 @@ def _build_graph_from_csv(
     """
     logger.info("Reading PrimeKG CSV from %s …", csv_path)
     try:
-        df = pd.read_csv(csv_path, low_memory=False)
+        # Only the used columns; string columns as categoricals (codes + one
+        # copy of each distinct string) instead of ~6 objects per row.
+        df = pd.read_csv(
+            csv_path,
+            usecols=lambda c: c in _KG_COLS,
+            dtype={c: "category" for c in _KG_STR_COLS},
+            low_memory=False,
+        )
     except FileNotFoundError:
         logger.error(
             "PrimeKG CSV not found at %s. "
@@ -121,19 +184,21 @@ def _build_graph_from_csv(
 
     name_to_node: dict[str, int] = {}
     type_to_nodes: dict[str, list[int]] = defaultdict(list)
-    node_to_neighbors: dict[int, list[tuple[int, str]]] = defaultdict(list)
 
-    # Convert columns to Python lists for 50x faster vector iteration
+    # Convert columns to Python lists for 50x faster vector iteration.
+    # Equal strings share one object (see shared_str_list).
     x_indices = df["x_index"].astype(int).tolist()
-    x_names = df["x_name"].astype(str).tolist()
-    x_types = df["x_type"].astype(str).tolist()
+    x_names = shared_str_list(df["x_name"])
+    x_types = shared_str_list(df["x_type"])
 
     y_indices = df["y_index"].astype(int).tolist()
-    y_names = df["y_name"].astype(str).tolist()
-    y_types = df["y_type"].astype(str).tolist()
+    y_names = shared_str_list(df["y_name"])
+    y_types = shared_str_list(df["y_type"])
 
-    relations = df["relation"].astype(str).tolist()
-    disp_relations = df["display_relation"].astype(str).tolist()
+    relations = shared_str_list(df["relation"])
+    disp_relations = shared_str_list(df["display_relation"])
+    del df  # the lists hold everything the graph needs
+    release_freed_memory()
 
     # Register all nodes first
     for x_idx, x_name, x_type, y_idx, y_name, y_type in zip(
@@ -151,19 +216,23 @@ def _build_graph_from_csv(
                 name_to_node[y_name] = y_idx
             type_to_nodes[y_type].append(y_idx)
 
-    # Register all edges
+    # Register all edges. node_to_neighbors used to be built here as a
+    # second full copy of the adjacency (~10M tuples); nothing in the
+    # pipeline reads it, so KnowledgeGraph derives it lazily from G.
     for src, dst, rel, disp_rel in zip(x_indices, y_indices, relations, disp_relations):
         G.add_edge(src, dst, relation=rel, display_relation=disp_rel)
-        node_to_neighbors[src].append((dst, rel))
-        node_to_neighbors[dst].append((src, rel))
+    del x_indices, y_indices, x_names, y_names, x_types, y_types, relations, disp_relations
+
+    n_shared = compact_graph(G)
+    logger.info("Edge attributes compacted to %d shared dicts.", n_shared)
+    release_freed_memory()
 
     # Convert defaultdicts → plain dicts for pickling clarity
     type_to_nodes = dict(type_to_nodes)
-    node_to_neighbors = dict(node_to_neighbors)
 
     _log_graph_stats(G, type_to_nodes)
 
-    return G, name_to_node, type_to_nodes, node_to_neighbors
+    return G, name_to_node, type_to_nodes, None
 
 def _log_graph_stats(
     G: nx.MultiDiGraph,
@@ -195,7 +264,7 @@ def _save_graph(
     G: nx.MultiDiGraph,
     name_to_node: dict[str, int],
     type_to_nodes: dict[str, list[int]],
-    node_to_neighbors: dict[int, list[tuple[int, str]]],
+    node_to_neighbors: Optional[dict[int, list[tuple[int, str]]]],
     path: Path,
 ) -> None:
     """Serialize graph + lookup dicts to a pickle file."""
@@ -221,12 +290,16 @@ def _load_from_pickle(path: Path) -> tuple[
     logger.info("Loading graph from pickle: %s", path)
     with open(path, "rb") as f:
         payload = pickle.load(f)  # noqa: S301
-    return (
-        payload["graph"],
-        payload["name_to_node"],
-        payload["type_to_nodes"],
-        payload["node_to_neighbors"],
-    )
+    G = payload.pop("graph")
+    # Older pickles carry a full node_to_neighbors copy and per-edge attribute
+    # dicts: drop the former and share the latter so RSS falls back down.
+    payload.pop("node_to_neighbors", None)
+    n_shared = compact_graph(G)
+    logger.info("Edge attributes compacted to %d shared dicts.", n_shared)
+    result = (G, payload.pop("name_to_node"), payload.pop("type_to_nodes"), None)
+    del payload
+    release_freed_memory()
+    return result
 
 # Public loader
 
@@ -281,12 +354,23 @@ class KnowledgeGraph:
         graph: nx.MultiDiGraph,
         name_to_node: dict[str, int],
         type_to_nodes: dict[str, list[int]],
-        node_to_neighbors: dict[int, list[tuple[int, str]]],
+        node_to_neighbors: Optional[dict[int, list[tuple[int, str]]]] = None,
     ) -> None:
         self.graph = graph
         self.name_to_node = name_to_node
         self.type_to_nodes = type_to_nodes
-        self.node_to_neighbors = node_to_neighbors
+        self._node_to_neighbors = node_to_neighbors
+
+    @property
+    def node_to_neighbors(self) -> dict[int, list[tuple[int, str]]]:
+        """Built from the graph on first use (not kept in RAM by default)."""
+        if self._node_to_neighbors is None:
+            self._node_to_neighbors = neighbors_from_graph(self.graph)
+        return self._node_to_neighbors
+
+    @node_to_neighbors.setter
+    def node_to_neighbors(self, value) -> None:
+        self._node_to_neighbors = value
 
     # -- node lookup --------------------------------------------------------
 

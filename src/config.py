@@ -377,7 +377,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "nvidia")  # "nvidia", "huggingface", o
 LLM_HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 JUDGE_HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # Separate judge to avoid self-preference bias
 # Local (ollama) judge. Resolved from the registry in src/judge_models.py:
-#   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > qwen2.5:72b.
+#   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > gemma2:9b (q4_K_M).
 # The Kaggle notebook sets JUDGE_MODEL_INDEX; never edit tags here.
 from src.judge_models import resolve_judge_ollama_model as _resolve_judge
 
@@ -556,10 +556,11 @@ def decision_gate_enabled() -> bool:
 # separated list of "provider:model" specs; the first entry is the primary
 # judge. The 70B judge is an optional API judge (NVIDIA NIM by default).
 # ---------------------------------------------------------------------------
-# Explicit 4-bit tags (registry indices 5 and 3) - same weights as Ollama's
-# default "gemma2:9b" / "qwen2.5:14b" tags, but the quantization is pinned.
-DEFAULT_JUDGE_ENSEMBLE = ("ollama:gemma2:9b-instruct-q4_K_M,"
-                          "ollama:qwen2.5:14b-instruct-q4_K_M")
+# Default: ONE 4-bit judge, Gemma 2 9B (registry index 5, ~5.8 GB). A
+# two-judge default kept ~15 GB of judge weights resident next to the
+# generator and the PrimeKG graph and ran Kaggle out of host RAM. Opt into
+# a panel explicitly via JUDGE_MODEL_INDEX="5,3" or JUDGE_ENSEMBLE.
+DEFAULT_JUDGE_ENSEMBLE = "ollama:gemma2:9b-instruct-q4_K_M"
 OPTIONAL_API_JUDGE = "nvidia:meta/llama-3.3-70b-instruct"
 
 

@@ -46,7 +46,7 @@ def test_settings_cell_validates_the_index():
     settings = _sources()[1]
 
     def run(value):
-        code = re.sub(r"(?m)^JUDGE_MODEL_INDEX = 0$", f"JUDGE_MODEL_INDEX = {value}",
+        code = re.sub(r"(?m)^JUDGE_MODEL_INDEX = [0-9]+.*$", f"JUDGE_MODEL_INDEX = {value}",
                       settings, count=1)
         ns = {}
         exec(code, ns)

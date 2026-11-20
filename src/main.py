@@ -90,6 +90,12 @@ def cmd_prepare(args):
     except Exception as e:
         print(f"  ⚠ SapBERT index failed: {e}")
 
+    # Step 5 re-reads the CSV and embeds it; the graph is not needed there.
+    # Freeing it first keeps prepare's peak host RAM to one stage, not two.
+    from src.core.memory import release_freed_memory
+    kg = linker = None
+    release_freed_memory()
+
     # ── Step 5: Build ChromaDB vector store with clinical relations ─
     print("\n" + "=" * 60)
     print("Step 5/5: Building ChromaDB vector store...")

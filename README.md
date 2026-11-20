@@ -145,7 +145,7 @@ a generation or judging effect.
 ### 1. Prerequisites & Environment Setup
 
 ```bash
-git clone https://github.com/ajheshbasnet/HCAD.git
+git clone https://github.com/eklakhdewan/HCAD.git
 cd HCAD
 
 # Create and activate virtual environment

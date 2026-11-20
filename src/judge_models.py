@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 DEFAULT_QUANT = "q4_K_M"
-DEFAULT_JUDGE_TAG = "qwen2.5:72b"
+DEFAULT_JUDGE_TAG = "gemma2:9b-instruct-q4_K_M"  # registry index 5, smallest (~5.8 GB)
 
 # Model families that emit chain-of-thought unless told not to. Thinking
 # tokens eat the judge's token budget and break JSON parsing, so the client

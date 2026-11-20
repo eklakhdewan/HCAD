@@ -82,6 +82,9 @@ def build_vector_store(
     df = pd.read_csv(
         kg_csv_path,
         usecols=["relation", "display_relation", "x_name", "y_name", "x_type", "y_type"],
+        # categoricals: one copy per distinct string instead of one per row
+        dtype={c: "category" for c in ("relation", "display_relation", "x_name",
+                                       "y_name", "x_type", "y_type")},
         nrows=max_rows,
     )
     logger.info(f"Loaded {len(df):,} edges")
@@ -120,12 +123,16 @@ def build_vector_store(
     )
 
     # Convert DataFrame columns to lists for fast iteration
-    x_names = df["x_name"].astype(str).tolist()
-    y_names = df["y_name"].astype(str).tolist()
-    disp_rels = df["display_relation"].astype(str).tolist()
-    x_types = df["x_type"].astype(str).tolist()
-    y_types = df["y_type"].astype(str).tolist()
-    relations = df["relation"].astype(str).tolist()
+    from src.core.memory import release_freed_memory
+    from src.data.build_knowledge_graph import shared_str_list
+    x_names = shared_str_list(df["x_name"])
+    y_names = shared_str_list(df["y_name"])
+    disp_rels = shared_str_list(df["display_relation"])
+    x_types = shared_str_list(df["x_type"])
+    y_types = shared_str_list(df["y_type"])
+    relations = shared_str_list(df["relation"])
+    del df
+    release_freed_memory()
 
     total_rows = len(x_names)
     logger.info(f"Processing and indexing {total_rows:,} edges in batches of {batch_size}...")

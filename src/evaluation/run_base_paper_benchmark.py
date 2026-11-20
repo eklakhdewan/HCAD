@@ -847,6 +847,23 @@ def selection_pairs(arm_ids: Sequence[str]) -> List[tuple]:
     return pairs
 
 
+def _log_rss(stage: str) -> None:
+    """Log this process's resident RAM and host free RAM (Linux /proc only).
+
+    A SIGKILL leaves no traceback; these lines show which load pushed the
+    host over the limit.
+    """
+    try:
+        rss_kb = next(int(l.split()[1]) for l in open("/proc/self/status")
+                      if l.startswith("VmRSS:"))
+        avail_kb = next(int(l.split()[1]) for l in open("/proc/meminfo")
+                        if l.startswith("MemAvailable:"))
+    except (OSError, StopIteration, ValueError):
+        return
+    logger.info("RAM after %s: process %.1f GB, host available %.1f GB",
+                stage, rss_kb / 1e6, avail_kb / 1e6)
+
+
 def build_arms(arm_ids: Sequence[str]) -> Dict[str, BenchmarkArm]:
     """Instantiate the requested systems (heavy resources loaded once)."""
     from src.baselines.baseline_llm import BaselineLLM
@@ -855,11 +872,13 @@ def build_arms(arm_ids: Sequence[str]) -> Dict[str, BenchmarkArm]:
     arms: Dict[str, BenchmarkArm] = {}
     need_dense = bool({"dense", "hybrid", "bm25"} & set(arm_ids))
     vanilla = VanillaVectorRAG() if need_dense else None
+    _log_rss("dense retriever + vector store")
     bm25_index = None
     if {"bm25", "hybrid"} & set(arm_ids):
         from src.baselines.sparse_retrievers import BM25Index
         logger.info("Building BM25 index over the vector-store corpus...")
         bm25_index = BM25Index.from_collection(vanilla.collection)
+        _log_rss("BM25 index")
 
     if "closed_book" in arm_ids:
         arms["closed_book"] = BenchmarkArm(
@@ -886,8 +905,10 @@ def build_arms(arm_ids: Sequence[str]) -> Dict[str, BenchmarkArm]:
 
         hcad = HCADRetriever(fail_on_vector_error=True)
         hcad._ensure_components()
+        _log_rss("HCAD components (NER, embedders)")
         _ = hcad.graph
         _ = hcad.hypergraph
+        _log_rss("PrimeKG graph + hypergraph")
         if getattr(getattr(hcad, "_ner", None), "degraded", False):
             raise RuntimeError(
                 "SciSpacy NER failed to load (BiomedicalNER in degraded regex "

@@ -12,7 +12,6 @@ Every retriever returns contexts in the same shape as
 """
 from __future__ import annotations
 
-import json
 import logging
 import re
 from pathlib import Path
@@ -43,50 +42,69 @@ class BM25Index:
 
     idf(t) = ln(1 + (N - df + 0.5) / (df + 0.5))
     score(q, d) = sum_t idf(t) * tf * (k1 + 1) / (tf + k1 * (1 - b + b * |d| / avgdl))
+
+    Memory: the term matrix is accumulated in compact typed arrays (not
+    Python int lists) and only the CSC copy that ``scores`` reads is kept.
+    ``from_collection`` additionally keeps NO document texts / metadata in
+    RAM (817k chunks on the benchmark store): the top-k hits are fetched
+    back from Chroma by id, so search results are identical.
     """
 
     def __init__(self, documents: Sequence[str], ids: Optional[Sequence[str]] = None,
                  metadatas: Optional[Sequence[dict]] = None,
                  k1: float = 1.2, b: float = 0.75):
-        from scipy.sparse import csr_matrix
+        documents = list(documents)
+        ids = [str(i) for i in (ids if ids is not None else range(len(documents)))]
+        metadatas = list(metadatas) if metadatas is not None else [{} for _ in documents]
+        if not (len(ids) == len(documents) == len(metadatas)):
+            raise ValueError("documents, ids and metadatas must align")
+        self.documents: Optional[list] = documents
+        self.metadatas: Optional[list] = metadatas
+        self._fetch = None
+        self._build(iter(documents), ids, k1, b)
+
+    def _build(self, texts, ids: list, k1: float, b: float) -> None:
+        from array import array
+        from itertools import repeat
+
+        from scipy.sparse import csc_matrix
 
         self.k1, self.b = k1, b
-        self.documents = list(documents)
-        self.ids = [str(i) for i in (ids if ids is not None else range(len(self.documents)))]
-        self.metadatas = list(metadatas) if metadatas is not None else [{} for _ in self.documents]
-        if not (len(self.ids) == len(self.documents) == len(self.metadatas)):
-            raise ValueError("documents, ids and metadatas must align")
         self.vocab: dict[str, int] = {}
-        rows, cols, vals = [], [], []
-        doc_len = np.zeros(len(self.documents), dtype=np.float32)
-        for d, text in enumerate(self.documents):
+        rows, cols, vals = array("i"), array("i"), array("f")
+        lengths = array("f")
+        for d, text in enumerate(texts):
             toks = bm25_tokenize(text)
-            doc_len[d] = len(toks)
+            lengths.append(len(toks))
             tf: dict[int, int] = {}
             for t in toks:
                 j = self.vocab.setdefault(t, len(self.vocab))
                 tf[j] = tf.get(j, 0) + 1
-            rows.extend([d] * len(tf))
+            rows.extend(repeat(d, len(tf)))
             cols.extend(tf.keys())
             vals.extend(tf.values())
-        n_docs = len(self.documents)
-        self._tf = csr_matrix((np.asarray(vals, dtype=np.float32),
-                               (np.asarray(rows, dtype=np.int64),
-                                np.asarray(cols, dtype=np.int64))),
-                              shape=(n_docs, max(1, len(self.vocab))))
-        df = np.bincount(np.asarray(cols, dtype=np.int64),
-                         minlength=max(1, len(self.vocab))).astype(np.float64)
+        self.ids = [str(i) for i in ids]
+        n_docs = len(lengths)
+        if n_docs != len(self.ids):
+            raise ValueError(f"{n_docs} documents but {len(self.ids)} ids")
+        self._n = n_docs
+        doc_len = np.frombuffer(lengths, dtype=np.float32) if n_docs else             np.zeros(0, dtype=np.float32)
+        r = np.frombuffer(rows, dtype=np.int32) if len(rows) else np.zeros(0, np.int32)
+        c = np.frombuffer(cols, dtype=np.int32) if len(cols) else np.zeros(0, np.int32)
+        v = np.frombuffer(vals, dtype=np.float32) if len(vals) else np.zeros(0, np.float32)
+        n_terms = max(1, len(self.vocab))
+        self._tf_csc = csc_matrix((v, (r, c)), shape=(n_docs, n_terms))
+        df = np.bincount(c, minlength=n_terms).astype(np.float64)
+        del r, c, v, rows, cols, vals
         self.idf = np.log1p((n_docs - df + 0.5) / (df + 0.5)).astype(np.float32)
         avgdl = float(doc_len.mean()) if n_docs else 0.0
-        self._norm = (k1 * (1.0 - b + b * doc_len / avgdl)).astype(np.float32) if avgdl else \
-            np.full(n_docs, k1, dtype=np.float32)
-        self._tf_csc = self._tf.tocsc()
+        self._norm = (k1 * (1.0 - b + b * doc_len / avgdl)).astype(np.float32) if avgdl else             np.full(n_docs, k1, dtype=np.float32)
 
     def __len__(self) -> int:
-        return len(self.documents)
+        return self._n
 
     def scores(self, query: str) -> np.ndarray:
-        out = np.zeros(len(self.documents), dtype=np.float32)
+        out = np.zeros(self._n, dtype=np.float32)
         q_terms = [self.vocab[t] for t in set(bm25_tokenize(query)) if t in self.vocab]
         for j in q_terms:
             col = self._tf_csc.getcol(j)
@@ -98,43 +116,65 @@ class BM25Index:
     def search(self, query: str, top_k: int = VANILLA_TOP_K) -> list[dict]:
         if top_k <= 0:
             raise ValueError(f"top_k must be positive, got {top_k}")
-        if not self.documents:
+        if not self._n:
             return []
         s = self.scores(query)
         k = min(top_k, len(s))
         top = np.argpartition(-s, k - 1)[:k]
         # deterministic: score desc, then index asc
         top = sorted(top.tolist(), key=lambda i: (-float(s[i]), i))
-        return [{"id": self.ids[i], "text": self.documents[i],
-                 "score": round(float(s[i]), 6), "metadata": self.metadatas[i] or {}}
-                for i in top]
+        if self.documents is not None:
+            texts = [self.documents[i] for i in top]
+            metas = [self.metadatas[i] for i in top]
+        else:
+            texts, metas = self._fetch([self.ids[i] for i in top])
+        return [{"id": self.ids[i], "text": text,
+                 "score": round(float(s[i]), 6), "metadata": meta or {}}
+                for i, text, meta in zip(top, texts, metas)]
 
     # -- persistence for the 800k-document benchmark store --------------------
     @classmethod
     def from_collection(cls, collection, cache_path: Optional[Path] = None,
                         page_size: int = 5000) -> "BM25Index":
-        """Build over every document of a Chroma collection (paged)."""
-        if cache_path is not None and Path(cache_path).exists():
-            with open(cache_path, "r", encoding="utf-8") as f:
-                cached = json.load(f)
-            if cached.get("count") == collection.count():
-                logger.info("BM25 corpus loaded from %s (%d docs)", cache_path, cached["count"])
-                return cls(cached["documents"], cached["ids"], cached["metadatas"])
-        docs, ids, metas = [], [], []
+        """Build over every document of a Chroma collection (paged).
+
+        Pages are tokenized as they arrive and then dropped, so peak RAM is
+        one page of text plus the term matrix, not the whole corpus.
+        ``cache_path`` is accepted for backward compatibility and ignored
+        (the old JSON cache held the full corpus in RAM).
+        """
         total = collection.count()
-        for offset in range(0, total, page_size):
-            got = collection.get(limit=page_size, offset=offset,
-                                 include=["documents", "metadatas"])
-            docs.extend(got.get("documents") or [])
-            ids.extend(got.get("ids") or [])
-            metas.extend(got.get("metadatas") or [{}] * len(got.get("documents") or []))
-        logger.info("BM25 index built over %d documents", len(docs))
-        if cache_path is not None:
-            Path(cache_path).parent.mkdir(parents=True, exist_ok=True)
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump({"count": total, "documents": docs, "ids": ids,
-                           "metadatas": metas}, f)
-        return cls(docs, ids, metas)
+        ids: list[str] = []
+
+        def _texts():
+            for offset in range(0, total, page_size):
+                got = collection.get(limit=page_size, offset=offset,
+                                     include=["documents"])
+                page_ids = got.get("ids") or []
+                page_docs = got.get("documents") or []
+                if len(page_ids) != len(page_docs):
+                    raise RuntimeError("Chroma page returned misaligned ids/documents")
+                ids.extend(str(i) for i in page_ids)
+                yield from page_docs
+
+        def _fetch(want: list) -> tuple:
+            got = collection.get(ids=list(want), include=["documents", "metadatas"])
+            metas = got.get("metadatas") or [None] * len(got.get("ids") or [])
+            by_id = {str(i): (d, m) for i, d, m in
+                     zip(got.get("ids") or [], got.get("documents") or [], metas)}
+            missing = [i for i in want if i not in by_id]
+            if missing:
+                raise RuntimeError(f"BM25 hit ids missing from the vector store: {missing[:5]}")
+            return [by_id[i][0] for i in want], [by_id[i][1] for i in want]
+
+        # ids is filled while _texts() is consumed; _build reads it afterwards.
+        self = cls.__new__(cls)
+        self.documents = None
+        self.metadatas = None
+        self._fetch = _fetch
+        self._build(_texts(), ids, 1.2, 0.75)
+        logger.info("BM25 index built over %d documents (texts kept in Chroma)", self._n)
+        return self
 
 
 def reciprocal_rank_fusion(rankings: Sequence[Sequence[dict]], top_k: int,

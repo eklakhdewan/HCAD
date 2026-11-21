@@ -377,7 +377,7 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "nvidia")  # "nvidia", "huggingface", o
 LLM_HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 JUDGE_HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # Separate judge to avoid self-preference bias
 # Local (ollama) judge. Resolved from the registry in src/judge_models.py:
-#   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > gemma2:9b (q4_K_M).
+#   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > gemma2:9b (q8_0).
 # The Kaggle notebook sets JUDGE_MODEL_INDEX; never edit tags here.
 from src.judge_models import resolve_judge_ollama_model as _resolve_judge
 
@@ -400,16 +400,28 @@ HF_TOKEN = os.getenv("HF_TOKEN", "")  # Hub downloads (SapBERT/S-PubMedBert) sti
 WANDB_PROJECT = os.getenv("WANDB_PROJECT", "hcad-rag")
 WANDB_ENTITY = os.getenv("WANDB_ENTITY") or None
 WANDB_MODE = os.getenv("WANDB_MODE", "online")
-# Generator: Llama-3.1-8B-Instruct, 4-bit (Q4_K_M, ~4.9 GB). Explicit quant
-# tag (identical weights to Ollama's default "llama3.1:8b"), so the
-# quantization is pinned instead of depending on Ollama's default tag.
-LLM_MODEL = "llama3.1:8b-instruct-q4_K_M"
+# Generator: Llama-3.1-8B-Instruct via ollama, explicit quant tag so the
+# precision is pinned instead of depending on Ollama's default tag.
+# LLM_QUANT picks it (default 8-bit q8_0, ~8.5 GB). Sizes (weights only):
+# q4_K_M 4.9 GB, q5_K_M 5.7 GB, q6_K 6.6 GB, q8_0 8.5 GB, fp16 16 GB.
+LLM_QUANT_SIZES_GB = {"q4_K_M": 4.9, "q5_K_M": 5.7, "q6_K": 6.6, "q8_0": 8.5, "fp16": 16.1}
+LLM_QUANT = os.getenv("LLM_QUANT", "q8_0").strip()
+if LLM_QUANT not in LLM_QUANT_SIZES_GB:
+    raise ValueError(f"LLM_QUANT={LLM_QUANT!r} is not available; "
+                     f"choose one of {', '.join(LLM_QUANT_SIZES_GB)}")
+LLM_MODEL = f"llama3.1:8b-instruct-{LLM_QUANT}"
 # Untagged spelling accepted as an alias of LLM_MODEL.
 LLM_MODEL_ALIASES = ("llama3.1:8b",)
 # Base-paper Fig. 3 parity: evaluate augmentation generality across generators.
 BENCHMARK_GENERATORS = [LLM_MODEL]  # e.g. ["llama3.1:8b", "qwen3:14b", "deepseek-r1:8b"]
 LLM_TEMPERATURE = 0.1
-LLM_MAX_TOKENS = 1024
+# Answer token cap. The shared synthesis prompt asks for 'under 800 words'
+# (~1,050-1,100 tokens), so 1024 cut compliant answers mid-sentence.
+LLM_MAX_TOKENS = int(os.getenv("LLM_MAX_TOKENS", "1536"))
+# Generator context window (ollama num_ctx). Prompt (~1.1-1.3k tokens with
+# the 350-word evidence block) + LLM_MAX_TOKENS must fit; Ollama's small
+# default context silently drops the start of the prompt.
+LLM_NUM_CTX = int(os.getenv("LLM_NUM_CTX", "4096"))
 ENABLE_FEW_SHOT = False  # zero-shot default; opt into few-shot explicitly
 FEW_SHOT_COUNT = 4  # consumed by PromptBuilder.build_mcq_prompt
 
@@ -552,50 +564,31 @@ def decision_gate_enabled() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Multi-judge evaluation (advisor directive). JUDGE_ENSEMBLE is a comma
-# separated list of "provider:model" specs; the first entry is the primary
-# judge. The 70B judge is an optional API judge (NVIDIA NIM by default).
+# Judge selection. Exactly ONE judge scores a run, picked by index from the
+# menu in src/judge_models.py (JUDGE_MODEL_INDEX + JUDGE_QUANT). The menu
+# exists so a judge that runs out of memory can be swapped for another
+# index; there is no multi-judge consensus panel.
+# Default: Gemma 2 9B at 8-bit (registry index 5, ~9.8 GB).
 # ---------------------------------------------------------------------------
-# Default: ONE 4-bit judge, Gemma 2 9B (registry index 5, ~5.8 GB). A
-# two-judge default kept ~15 GB of judge weights resident next to the
-# generator and the PrimeKG graph and ran Kaggle out of host RAM. Opt into
-# a panel explicitly via JUDGE_MODEL_INDEX="5,3" or JUDGE_ENSEMBLE.
-DEFAULT_JUDGE_ENSEMBLE = "ollama:gemma2:9b-instruct-q4_K_M"
-OPTIONAL_API_JUDGE = "nvidia:meta/llama-3.3-70b-instruct"
-
-
 def judge_ensemble_specs() -> list[tuple[str, str]]:
-    """Parsed judge ensemble: [(provider, model), ...] (primary first).
+    """The judge as [(provider, model)] - always exactly one entry.
 
-    Precedence: JUDGE_ENSEMBLE (explicit "provider:model" list) >
-    JUDGE_MODEL_INDEX (registry index/indices, quantized) > the default
-    local pair. JUDGE_ENABLE_API_JUDGE=1 appends the optional
-    Llama-3.3-70B API judge.
+    Kept as a one-element list because the evaluator and the checkpoint
+    records store judges as a list. Resolution: JUDGE_OLLAMA_MODEL (exact
+    tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > the default judge.
+    JUDGE_PROVIDER=huggingface/nvidia still moves this one judge to an API.
     """
-    raw = os.environ.get("JUDGE_ENSEMBLE", "").strip()
-    if not raw:
-        # Notebook path: JUDGE_MODEL_INDEX ("2" or "0,3") -> quantized tags
-        # from the registry in src/judge_models.py.
-        from src.judge_models import resolve_judge_tags
-        tags = resolve_judge_tags()
-        raw = ",".join(f"ollama:{t}" for t in tags) if tags else DEFAULT_JUDGE_ENSEMBLE
-    specs: list[tuple[str, str]] = []
-    entries = [e.strip() for e in raw.split(",") if e.strip()]
+    if os.environ.get("JUDGE_ENSEMBLE", "").strip():
+        raise ValueError(
+            "JUDGE_ENSEMBLE was removed: a run uses ONE judge. Set "
+            "JUDGE_MODEL_INDEX=<n> (see src/judge_models.py) instead."
+        )
     if os.environ.get("JUDGE_ENABLE_API_JUDGE", "0") == "1":
-        entries.append(OPTIONAL_API_JUDGE)
-    for entry in entries:
-        provider, sep, model = entry.partition(":")
-        if not sep or not model:
-            raise ValueError(
-                f"Invalid JUDGE_ENSEMBLE entry {entry!r}: expected 'provider:model'"
-            )
-        provider = provider.strip().lower()
-        if provider not in ("ollama", "nvidia", "huggingface"):
-            raise ValueError(f"Unknown judge provider {provider!r} in {entry!r}")
-        spec = (provider, model.strip())
-        if spec not in specs:
-            specs.append(spec)
-    return specs
+        raise ValueError(
+            "JUDGE_ENABLE_API_JUDGE was removed: a run uses ONE judge. Use "
+            "JUDGE_PROVIDER=nvidia to run the judge on NVIDIA NIM instead."
+        )
+    return [("ollama", _resolve_judge())]
 
 
 JUDGE_TEMPERATURE = 0.0

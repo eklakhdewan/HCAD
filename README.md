@@ -82,8 +82,8 @@ Three channels are pooled:
 
 ### 5. Generation
 A structured prompt lists the evidence as `[Evidence i]` blocks with source
-and relevance and is sent to Llama-3.1-8B-Instruct (4-bit,
-`llama3.1:8b-instruct-q4_K_M`). The instructions are the same shared
+and relevance and is sent to Llama-3.1-8B-Instruct (8-bit,
+`llama3.1:8b-instruct-q8_0`; `LLM_QUANT`). The instructions are the same shared
 `synthesis_instructions` every arm gets.
 
 ```
@@ -109,7 +109,7 @@ Semantic Decoupling [E;R;M]      Candidate Pool (≤ 80)
                       ▼
         Evidence assembly: hyperedge grouping, 350-word budget, clip-not-drop
                       ▼
-        Llama-3.1-8B-Instruct (4-bit) ──► cited clinical answer
+        Llama-3.1-8B-Instruct (8-bit) ──► cited clinical answer
 ```
 
 ### Evaluation fairness (judge side)
@@ -164,8 +164,8 @@ Use the repository-root `.env` as the single local environment file — copy
 `.env.example` and keep one profile:
 - **Profile A (all LLMs local via ollama, zero LLM API keys):**
   `LLM_PROVIDER=ollama` + `JUDGE_MODEL_INDEX=<n>` (see *Judge selection*
-  below). The generator (`llama3.1:8b-instruct-q4_K_M`) and the judge(s) run
-  via ollama, all 4-bit. Everything else keeps its existing behaviour: W&B
+  below). The generator (`llama3.1:8b-instruct-q8_0`) and the judge run
+  via ollama, all 8-bit. Everything else keeps its existing behaviour: W&B
   stays online if `WANDB_API_KEY` is set, and the JEV gate stays live if
   `TYPESAFE_API_KEY` is set.
 - **Profile B (cloud-judge upgrade, opt-in):** `JUDGE_PROVIDER=huggingface`
@@ -214,16 +214,14 @@ Arms (one label each, used verbatim in JSON, tables and figures):
 **Llama-3.1-8B-Instruct (Zero-Retrieval / Closed-Book)**, BM25 RAG (top-5),
 Dense RAG (S-PubMedBERT, top-5), Hybrid BM25+Dense RAG (RRF, top-5), HCAD-RAG.
 Judges: selected by `JUDGE_MODEL_INDEX` (below), or an explicit
-`JUDGE_ENSEMBLE` list. The default panel is
-`ollama:gemma2:9b-instruct-q4_K_M,ollama:qwen2.5:14b-instruct-q4_K_M`, and
-`JUDGE_ENABLE_API_JUDGE=1` adds `meta/llama-3.3-70b-instruct` via NVIDIA NIM.
+(exactly one judge per run). The default judge is
+`ollama:gemma2:9b-instruct-q8_0`.
 Every call runs in JSON mode, and a judge failure never becomes a neutral
 fallback score.
 Outputs:
 - **5-Dimension Scoring Assessment** (0–100 scale: Comprehensiveness, Diversity, Empowerment, Logical, Readability)
 - **8-Criteria Selection Assessment** (Pairwise Win-Rate with order counterbalancing)
-- **Statistics** (`src/evaluation/stats.py`): bootstrap 95% CIs per rubric dimension, paired bootstrap CI of score differences, two-sided Wilcoxon signed-rank, paired t-test, exact McNemar - for the judge consensus and for each judge
-- **Inter-judge agreement**: Cohen's kappa per judge pair and Fleiss' kappa (pairwise winners, correctness, rubric band)
+- **Statistics** (`src/evaluation/stats.py`): bootstrap 95% CIs per rubric dimension, paired bootstrap CI of score differences, two-sided Wilcoxon signed-rank, paired t-test, exact McNemar
 - **Latency breakdown** (`results/latency_breakdown.json`): retrieval-only latency (1 cold + N warm runs, mean ± std, per pipeline stage for HCAD-RAG) separated from generation latency (prefill/decode seconds, prompt/generated tokens, tokens/s)
 - **Retrieval Quality** (`src/evaluation/metrics.py`): NDCG@5 / Recall@5 over the paper-protocol gold relevance labels — the source chunk that generated each question
 - **Citation Precision**: fraction of `[Evidence i]` tags in generated answers that resolve to actually retrieved items
@@ -233,7 +231,7 @@ Outputs:
 Per-question results are checkpointed to `results/base_paper_checkpoint.jsonl`
 and all aggregates are recomputed from the checkpoint, so interrupted runs
 resume without losing or double-counting samples. Every record is tagged
-with its judge panel and an HCAD evidence-config fingerprint
+with its judge, its generator tag and an HCAD evidence-config fingerprint
 (`hcad_config_id`). A question counts as done, and is aggregated, only for
 the same judges and the same HCAD settings, so switching the judge index or
 an evidence toggle re-evaluates rather than mixing scores. W&B logs the
@@ -244,23 +242,28 @@ configured.
 `src/judge_models.py` is the single registry of judge models. Set an index
 and every judge call in `src/` follows, with no source edits:
 
-| `JUDGE_MODEL_INDEX` | Judge | `q4_K_M` tag | Size |
+| `JUDGE_MODEL_INDEX` | Judge | `q8_0` tag | Size |
 |---|---|---|---|
-| 0 | Qwen3-14B | `qwen3:14b-q4_K_M` | 9.3 GB |
-| 1 | DeepSeek-R1-Distill-Qwen-14B | `deepseek-r1:14b-qwen-distill-q4_K_M` | 9.0 GB |
-| 2 | Gemma 3 12B IT | `gemma3:12b-it-q4_K_M` | 8.2 GB |
-| 3 | Qwen2.5-14B-Instruct | `qwen2.5:14b-instruct-q4_K_M` | 9.0 GB |
-| 4 | Phi-4 14B | `phi4:14b-q4_K_M` | 9.1 GB |
-| 5 | Gemma 2 9B IT | `gemma2:9b-instruct-q4_K_M` | 5.8 GB |
+| 0 | Qwen3-14B | `qwen3:14b-q8_0` | 16.0 GB |
+| 1 | DeepSeek-R1-Distill-Qwen-14B | `deepseek-r1:14b-qwen-distill-q8_0` | 16.0 GB |
+| 2 | Gemma 3 12B IT | `gemma3:12b-it-q8_0` | 13.0 GB |
+| 3 | Qwen2.5-14B-Instruct | `qwen2.5:14b-instruct-q8_0` | 16.0 GB |
+| 4 | Phi-4 14B | `phi4:14b-q8_0` | 16.0 GB |
+| 5 | Gemma 2 9B IT | `gemma2:9b-instruct-q8_0` | 9.8 GB |
 
-- `JUDGE_MODEL_INDEX=2` selects one judge; `JUDGE_MODEL_INDEX=0,3` selects a two-judge
-  consensus panel, with Cohen's/Fleiss' kappa reported.
-- Precedence: `JUDGE_ENSEMBLE` > `JUDGE_MODEL_INDEX` > default panel.
-- `JUDGE_QUANT` (default `q4_K_M`) picks the quantization; some models also
-  offer `q3_K_M`, `qat`, `q8_0` and `fp16`. An unknown index or quant fails
+- `JUDGE_MODEL_INDEX=2` selects the judge. Exactly one judge scores a run; the
+  table is a menu to swap from when a judge runs out of memory, not a panel.
+  A list such as `0,3` is rejected, and so are the removed `JUDGE_ENSEMBLE` /
+  `JUDGE_ENABLE_API_JUDGE` variables.
+- Precedence: `JUDGE_OLLAMA_MODEL` (exact tag) > `JUDGE_MODEL_INDEX` > default judge.
+- `JUDGE_QUANT` (default `q8_0`) picks the judge quantization; every model also
+  offers `q4_K_M` and `fp16`; some also offer `q3_K_M`, `q5_K_M`, `q6_K` or `qat`. An unknown index or quant fails
   immediately with the menu.
-- **All LLMs are 4-bit**: the generator and the default panel use explicit
-  `q4_K_M` tags rather than Ollama's implicit default tag.
+- **All LLMs are 8-bit by default**: the generator (`LLM_QUANT`, default `q8_0`)
+  and the judge (`JUDGE_QUANT`, default `q8_0`) use explicit tags rather than
+  Ollama's implicit default tag. On a T4 (15 GB) the 8-bit 14B judges (~16 GB)
+  are split over both GPUs and models are swapped one at a time; Gemma 2 9B
+  (index 5) fits next to the generator.
 - Memory: judge calls send `num_ctx=8192`. Reasoning models (qwen3,
   deepseek-r1) get `think=False`, so chain-of-thought does not consume the
   token budget or break the JSON.
@@ -290,7 +293,7 @@ the retriever. Anisotropic and component-scoring weights remain at their configu
 values; retrieval and model architecture are unchanged.
 ### Hybrid judging (small-GPU machines)
 `JUDGE_PROVIDER` decouples the judge from the generator. With
-`LLM_PROVIDER=ollama` (local `llama3.1:8b-instruct-q4_K_M` via ollama) plus
+`LLM_PROVIDER=ollama` (local `llama3.1:8b-instruct-q8_0` via ollama) plus
 `JUDGE_PROVIDER=huggingface`, the judge runs on the paper-parity
 `Qwen/Qwen2.5-72B-Instruct` through Hugging Face Inference Providers
 (pay-per-token, needs HF billing; roughly $2 for a 50-sample run) while all
@@ -364,7 +367,7 @@ HCAD/
 ├── .gitignore                         # Git exclusion rules
 ├── src/
 │   ├── config.py                      # Global configurations, model weights & paths
-│   ├── judge_models.py                # Judge registry: index + quant -> exact 4-bit ollama tag
+│   ├── judge_models.py                # Judge registry: index + quant -> exact ollama tag (8-bit default)
 │   ├── main.py                        # CLI entry point
 │   ├── wandb_tracking.py              # Shared W&B helpers (auto-enabled when configured)
 │   ├── api/

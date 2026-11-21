@@ -1,22 +1,21 @@
-"""Judge-model registry: pick the LLM judge by index + quantization level.
+"""Judge-model registry: pick THE LLM judge by index + quantization level.
 
 This module is the ONE place that knows which judge models exist. Everything
 else (src/config.py -> JUDGE_OLLAMA_MODEL -> UnifiedLLMClient ->
 BasePaperEvaluator) reads the resolved tag, so switching the judge never
 requires editing source files:
 
-    JUDGE_MODEL_INDEX=2 JUDGE_QUANT=qat python src/main.py base-paper ...
+    JUDGE_MODEL_INDEX=2 JUDGE_QUANT=q8_0 python src/main.py base-paper ...
 
-Judge ensemble used by the benchmark (config.judge_ensemble_specs):
-    1. JUDGE_ENSEMBLE      - explicit "provider:model,..." list (unchanged)
-    2. JUDGE_MODEL_INDEX   - "2" = one judge, "0,3" = a two-judge panel,
-                             each quantized via JUDGE_QUANT (default q4_K_M)
-    3. DEFAULT_JUDGE_ENSEMBLE in config.py
+Exactly ONE judge scores a run. The registry is a menu of interchangeable
+judges, not a panel: if the selected judge does not fit in memory (OOM),
+pick another index and re-run. A list of indices ("0,3") is rejected.
 
-Legacy single-judge tag (config.JUDGE_OLLAMA_MODEL):
-    JUDGE_OLLAMA_MODEL (exact tag) > first JUDGE_MODEL_INDEX > DEFAULT_JUDGE_TAG
+Resolution (config.judge_ensemble_specs / config.JUDGE_OLLAMA_MODEL):
+    JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > DEFAULT_JUDGE_TAG
 
-Only the JUDGE is affected; the generator (llama3.1:8b, Q4_K_M) is untouched.
+Default precision is 8-bit (q8_0) for the judge; the generator's precision
+is set separately by LLM_QUANT in src/config.py.
 
 Kept dependency-free on purpose: the Kaggle notebook kernel imports it
 directly (different Python than the project env) to print the menu and
@@ -30,8 +29,8 @@ import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-DEFAULT_QUANT = "q4_K_M"
-DEFAULT_JUDGE_TAG = "gemma2:9b-instruct-q4_K_M"  # registry index 5, smallest (~5.8 GB)
+DEFAULT_QUANT = "q8_0"
+DEFAULT_JUDGE_TAG = "gemma2:9b-instruct-q8_0"  # registry index 5, smallest (~9.8 GB at 8-bit)
 
 # Model families that emit chain-of-thought unless told not to. Thinking
 # tokens eat the judge's token budget and break JSON parsing, so the client
@@ -154,10 +153,10 @@ def _parse_index(raw: str) -> int:
 
 
 def parse_indices(raw) -> List[int]:
-    """JUDGE_MODEL_INDEX value -> list of registry indices.
+    """JUDGE_MODEL_INDEX value -> [index] (always exactly one judge).
 
-    Accepts an int, "2", "0,3" or [0, 3]; one index = one judge, several =
-    a multi-judge consensus panel. Duplicates are rejected.
+    Accepts an int, "2" or [2]. Several indices are rejected: the menu is
+    for swapping judges (e.g. after an OOM), not for a consensus panel.
     """
     if isinstance(raw, bool):
         raise ValueError(f"JUDGE_MODEL_INDEX must be an integer, got {raw!r}")
@@ -170,15 +169,18 @@ def parse_indices(raw) -> List[int]:
         items = [_parse_index(p) for p in items]
     if not items:
         raise ValueError("JUDGE_MODEL_INDEX is empty. Options:\n" + format_judge_menu())
-    for i in items:
-        get_judge_model(i)  # validates type and range, raises with the menu
-    if len(set(items)) != len(items):
-        raise ValueError(f"JUDGE_MODEL_INDEX lists a judge twice: {items}")
+    if len(items) > 1:
+        raise ValueError(
+            f"JUDGE_MODEL_INDEX selects ONE judge, got {items}. To switch judges "
+            "(e.g. after an out-of-memory error), set a single other index:\n"
+            + format_judge_menu()
+        )
+    get_judge_model(items[0])  # validates type and range, raises with the menu
     return items
 
 
 def resolve_judge_tags(env: Optional[Dict[str, str]] = None) -> Optional[List[str]]:
-    """Ollama tags of the selected judge panel, or None when no index is set."""
+    """[tag] of the selected judge, or None when no index is set."""
     env = os.environ if env is None else env
     raw_index = (env.get("JUDGE_MODEL_INDEX") or "").strip()
     if not raw_index:

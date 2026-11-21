@@ -144,13 +144,14 @@ def test_grouped_line_still_matches_gold_triple():
 
 def test_changed_hcad_config_is_not_resumed(tmp_path, monkeypatch):
     import json
+    from src.config import LLM_MODEL
     from src.evaluation.run_base_paper_benchmark import (
         _completed_questions_from_checkpoint, _hcad_config_id)
 
     ckpt = tmp_path / "c.jsonl"
     ckpt.write_text(json.dumps({"schema": 2, "question": "q1", "question_pool": "test",
                                 "question_set_id": "s", "arms": {"hcad": "HCAD-RAG"},
-                                "judges": ["j"],
+                                "judges": ["j"], "generator": LLM_MODEL,
                                 "hcad_config_id": _hcad_config_id()}), encoding="utf-8")
     kw = {"required_arms": ["hcad"], "required_judges": ["j"]}
     assert _completed_questions_from_checkpoint(ckpt, "test", "s", **kw) == {"q1"}

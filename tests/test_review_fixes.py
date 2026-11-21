@@ -99,20 +99,21 @@ class TestConfig:
         assert canonical_system_label("Vanilla RAG") == ARM_LABELS["dense"]
         assert "Baseline LLM" not in ARM_LABELS.values()
 
-    def test_default_judge_ensemble(self, monkeypatch):
-        monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
-        monkeypatch.delenv("JUDGE_ENABLE_API_JUDGE", raising=False)
-        monkeypatch.delenv("JUDGE_MODEL_INDEX", raising=False)
-        assert judge_ensemble_specs() == [("ollama", "gemma2:9b-instruct-q4_K_M")]
+    def test_default_judge(self, monkeypatch):
+        for k in ("JUDGE_ENSEMBLE", "JUDGE_ENABLE_API_JUDGE", "JUDGE_MODEL_INDEX",
+                  "JUDGE_OLLAMA_MODEL", "JUDGE_QUANT"):
+            monkeypatch.delenv(k, raising=False)
+        assert judge_ensemble_specs() == [("ollama", "gemma2:9b-instruct-q8_0")]
 
-    def test_optional_api_judge(self, monkeypatch):
+    def test_api_judge_option_removed(self, monkeypatch):
         monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)
         monkeypatch.setenv("JUDGE_ENABLE_API_JUDGE", "1")
-        assert judge_ensemble_specs()[-1] == ("nvidia", "meta/llama-3.3-70b-instruct")
+        with pytest.raises(ValueError, match="removed"):
+            judge_ensemble_specs()
 
-    def test_invalid_judge_spec(self, monkeypatch):
+    def test_ensemble_option_removed(self, monkeypatch):
         monkeypatch.setenv("JUDGE_ENSEMBLE", "gemma2")
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="removed"):
             judge_ensemble_specs()
 
     def test_ablation_toggles(self, monkeypatch):
@@ -216,6 +217,34 @@ class TestMultiJudge:
         assert (st["prompt_tokens"], st["completion_tokens"]) == (120, 50)
         assert st["decode_s"] == pytest.approx(2.0)
         assert st["tokens_per_second"] == pytest.approx(25.0)
+        assert st["truncated"] is False
+
+    def test_generator_gets_context_window_and_truncation_is_flagged(self, monkeypatch):
+        import src.core.llm_client as mod
+        from src.config import LLM_NUM_CTX
+        from src.core.llm_client import UnifiedLLMClient
+
+        sent = {}
+
+        def post(url, json=None, **_):
+            sent.update(json)
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {
+                "message": {"content": "cut off mid"}, "prompt_eval_count": 900,
+                "eval_count": 64, "done_reason": "length"})
+
+        monkeypatch.setattr(mod.requests, "post", post)
+        client = UnifiedLLMClient(model="llama3.1:8b-instruct-q8_0", provider="ollama",
+                                  max_tokens=64)
+        _, st = client.chat_with_stats([{"role": "user", "content": "hi"}])
+        assert sent["options"]["num_ctx"] == LLM_NUM_CTX
+        assert sent["options"]["num_predict"] == 64
+        assert st["finish_reason"] == "length" and st["truncated"] is True
+
+    def test_answer_budget_fits_the_800_word_instruction(self):
+        from src.config import LLM_MAX_TOKENS, LLM_NUM_CTX
+
+        assert LLM_MAX_TOKENS >= 1400            # ~800 words of clinical prose
+        assert LLM_NUM_CTX >= LLM_MAX_TOKENS + 1500  # + prompt with evidence
 
 
 # ---------------------------------------------------------------------------
@@ -569,12 +598,13 @@ def test_cli_exposes_revision_commands():
 
 
 def test_resume_reruns_legacy_or_incompatible_records(tmp_path):
+    from src.config import LLM_MODEL
     from src.evaluation.run_base_paper_benchmark import (
         _completed_questions_from_checkpoint, _hcad_config_id)
 
     ckpt = tmp_path / "c.jsonl"
     base = {"question_pool": "test", "question_set_id": "s",
-            "hcad_config_id": _hcad_config_id()}
+            "hcad_config_id": _hcad_config_id(), "generator": LLM_MODEL}
     rows = [
         {**base, "question": "legacy"},                                   # schema 1
         {**base, "question": "ok", "schema": 2,

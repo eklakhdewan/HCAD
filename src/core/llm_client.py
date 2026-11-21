@@ -119,6 +119,11 @@ class UnifiedLLMClient:
             # small Ollama default context silently drops the instructions.
             from src.config import JUDGE_NUM_CTX
             options["num_ctx"] = JUDGE_NUM_CTX
+        else:
+            # Generator: prompt + answer must fit, or Ollama drops the
+            # start of the prompt (the question / evidence) without error.
+            from src.config import LLM_NUM_CTX
+            options["num_ctx"] = LLM_NUM_CTX
         return options
 
     def _chat_ollama(self, messages, temp, tokens, json_mode, model):
@@ -251,6 +256,7 @@ class UnifiedLLMClient:
                 self.last_usage = {
                     "prompt_tokens": usage.get("prompt_tokens"),
                     "completion_tokens": usage.get("completion_tokens"),
+                    "finish_reason": (data.get("choices") or [{}])[0].get("finish_reason"),
                 }
                 return data["choices"][0]["message"]["content"] or ""
             except Exception as e:
@@ -276,11 +282,13 @@ class UnifiedLLMClient:
                             max_tokens=tokens, temperature=temp,
                         )
                     usage = getattr(res, "usage", None)
+                    finish = getattr(res.choices[0], "finish_reason", None)
+                    self.last_usage = {"finish_reason": finish}
                     if usage is not None:
-                        self.last_usage = {
+                        self.last_usage.update({
                             "prompt_tokens": getattr(usage, "prompt_tokens", None),
                             "completion_tokens": getattr(usage, "completion_tokens", None),
-                        }
+                        })
                     return res.choices[0].message.content or ""
                 except Exception as e:
                     err = str(e)
@@ -316,6 +324,15 @@ class UnifiedLLMClient:
         wall = time.perf_counter() - t0
         usage = dict(self.last_usage or {})
         completion = usage.get("completion_tokens")
+        limit = max_tokens if max_tokens is not None else self.max_tokens
+        finish = usage.get("finish_reason")
+        # "length" = stopped by the token cap, i.e. the answer is cut off.
+        truncated = finish == "length" or (
+            finish is None and completion is not None and completion >= limit)
+        if truncated:
+            logger.warning(
+                "%s answer hit the %d-token cap and is cut off (finish_reason=%s); "
+                "raise LLM_MAX_TOKENS.", self.model, limit, finish)
         decode_s = usage.get("decode_s")
         if completion and decode_s:
             tps = completion / decode_s
@@ -330,6 +347,8 @@ class UnifiedLLMClient:
             "prefill_s": usage.get("prefill_s"),
             "decode_s": decode_s,
             "tokens_per_second": tps,
+            "finish_reason": finish,
+            "truncated": bool(truncated),
             "provider": self.provider,
             "model": self.model,
         }
@@ -347,6 +366,7 @@ def _ollama_usage(data: dict) -> dict:
     return {
         "prompt_tokens": data.get("prompt_eval_count"),
         "completion_tokens": data.get("eval_count"),
+        "finish_reason": data.get("done_reason"),
         "prefill_s": _sec("prompt_eval_duration"),
         "decode_s": _sec("eval_duration"),
     }

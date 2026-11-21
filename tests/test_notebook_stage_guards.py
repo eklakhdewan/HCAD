@@ -36,8 +36,8 @@ def test_settings_cell_exposes_only_the_judge_index():
     editable, _, fixed = settings.partition("Do NOT edit below this line.")
     assignments = re.findall(r"(?m)^([A-Z][A-Z0-9_]*) = ", editable)
     assert assignments == ["JUDGE_MODEL_INDEX"]
-    for const in ("JUDGE_QUANT = 'q4_K_M'", "N_SAMPLES = 30",
-                  "GENERATOR_TAG = 'llama3.1:8b-instruct-q4_K_M'",
+    for const in ("JUDGE_QUANT = 'q8_0'", "LLM_QUANT = 'q8_0'", "N_SAMPLES = 30",
+                  "GENERATOR_TAG = f'llama3.1:8b-instruct-{LLM_QUANT}'",
                   "OLLAMA_KV_CACHE_TYPE = 'q8_0'"):
         assert const in fixed
 
@@ -53,8 +53,7 @@ def test_settings_cell_validates_the_index():
         return ns["JUDGE_INDICES"]
 
     assert run("2") == [2]
-    assert run("[0, 3]") == [0, 3]
-    for bad in ("True", "'2'", "[1, 1]", "[0, 1, 2]", "[]"):
+    for bad in ("True", "'2'", "[0, 3]", "[1, 1]", "[2]", "[]"):
         try:
             run(bad)
         except (TypeError, ValueError):

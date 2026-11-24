@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.judge_models import (
+    ALLOWED_JUDGE_QUANTS,
     DEFAULT_JUDGE_TAG,
     JUDGE_MODELS,
     is_thinking_model,
@@ -22,34 +23,34 @@ from src.judge_models import (
 )
 
 
-def test_every_registry_entry_has_default_and_4bit_quant():
+def test_registry_is_strictly_4bit():
     for m in JUDGE_MODELS:
-        assert "q8_0" in m.quants, m.name     # default precision
-        assert "q4_K_M" in m.quants, m.name   # lower-memory fallback
+        assert "q4_K_M" in m.quants, m.name   # default precision
+        assert set(m.quants) <= set(ALLOWED_JUDGE_QUANTS), m.name
 
 
 def test_index_and_quant_resolve_to_exact_tags():
-    assert resolve_judge_tag(0) == "qwen3:14b-q8_0"
-    assert resolve_judge_tag(1) == "deepseek-r1:14b-qwen-distill-q8_0"
-    assert resolve_judge_tag(2) == "gemma3:12b-it-q8_0"
-    assert resolve_judge_tag(3) == "qwen2.5:14b-instruct-q8_0"
-    assert resolve_judge_tag(3, "q4_K_M") == "qwen2.5:14b-instruct-q4_K_M"
-    assert DEFAULT_JUDGE_TAG == "gemma2:9b-instruct-q8_0"
+    assert resolve_judge_tag(0) == "qwen3:14b-q4_K_M"
+    assert resolve_judge_tag(1) == "deepseek-r1:14b-qwen-distill-q4_K_M"
+    assert resolve_judge_tag(2) == "gemma3:12b-it-q4_K_M"
+    assert resolve_judge_tag(2, "qat") == "gemma3:12b-it-qat"
+    assert resolve_judge_tag(3) == "qwen2.5:14b-instruct-q4_K_M"
+    assert DEFAULT_JUDGE_TAG == "gemma2:9b-instruct-q4_K_M"
 
 
 def test_precedence_explicit_tag_then_index_then_default():
     assert resolve_judge_ollama_model({}) == DEFAULT_JUDGE_TAG
-    assert resolve_judge_ollama_model({"JUDGE_MODEL_INDEX": "3"}) == "qwen2.5:14b-instruct-q8_0"
+    assert resolve_judge_ollama_model({"JUDGE_MODEL_INDEX": "3"}) == "qwen2.5:14b-instruct-q4_K_M"
     assert resolve_judge_ollama_model(
-        {"JUDGE_MODEL_INDEX": "3", "JUDGE_OLLAMA_MODEL": "mistral-nemo:12b"}
-    ) == "mistral-nemo:12b"
+        {"JUDGE_MODEL_INDEX": "3", "JUDGE_OLLAMA_MODEL": "mistral-nemo:12b-instruct-2407-q4_K_M"}
+    ) == "mistral-nemo:12b-instruct-2407-q4_K_M"
 
 
 def test_exactly_one_judge_is_selected():
     assert parse_indices(2) == [2]
     assert parse_indices("2") == [2]
     assert parse_indices([4]) == [4]
-    assert resolve_judge_tags({"JUDGE_MODEL_INDEX": "3"}) == ["qwen2.5:14b-instruct-q8_0"]
+    assert resolve_judge_tags({"JUDGE_MODEL_INDEX": "3"}) == ["qwen2.5:14b-instruct-q4_K_M"]
     assert resolve_judge_tags({}) is None
     for several in ("0, 3", [1, 4], "0,0"):
         with pytest.raises(ValueError, match="ONE judge"):
@@ -61,7 +62,12 @@ def test_exactly_one_judge_is_selected():
     ({"JUDGE_MODEL_INDEX": "-1"}, "out of range"),
     ({"JUDGE_MODEL_INDEX": "two"}, "must be an integer"),
     ({"JUDGE_MODEL_INDEX": "0,3"}, "ONE judge"),
-    ({"JUDGE_MODEL_INDEX": "0", "JUDGE_QUANT": "q3_K_M"}, "not available"),
+    ({"JUDGE_MODEL_INDEX": "0", "JUDGE_QUANT": "qat"}, "not available"),
+    ({"JUDGE_MODEL_INDEX": "0", "JUDGE_QUANT": "q8_0"}, "strictly 4-bit"),
+    ({"JUDGE_MODEL_INDEX": "5", "JUDGE_QUANT": "fp16"}, "strictly 4-bit"),
+    ({"JUDGE_MODEL_INDEX": "5", "JUDGE_QUANT": "q3_K_M"}, "strictly 4-bit"),
+    ({"JUDGE_OLLAMA_MODEL": "gemma2:9b-instruct-q8_0"}, "strictly 4-bit"),
+    ({"JUDGE_OLLAMA_MODEL": "mistral-nemo:12b"}, "strictly 4-bit"),
 ])
 def test_invalid_selection_fails_loudly(env, match):
     with pytest.raises(ValueError, match=match):
@@ -77,9 +83,9 @@ def test_single_judge_follows_judge_index(monkeypatch):
     assert judge_ensemble_specs() == [("ollama", DEFAULT_JUDGE_TAG)]
 
     monkeypatch.setenv("JUDGE_MODEL_INDEX", "2")
-    assert judge_ensemble_specs() == [("ollama", "gemma3:12b-it-q8_0")]
-    monkeypatch.setenv("JUDGE_QUANT", "q4_K_M")
     assert judge_ensemble_specs() == [("ollama", "gemma3:12b-it-q4_K_M")]
+    monkeypatch.setenv("JUDGE_QUANT", "qat")
+    assert judge_ensemble_specs() == [("ollama", "gemma3:12b-it-qat")]
     monkeypatch.setenv("JUDGE_MODEL_INDEX", "0,5")
     with pytest.raises(ValueError, match="ONE judge"):
         judge_ensemble_specs()

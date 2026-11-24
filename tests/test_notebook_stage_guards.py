@@ -36,7 +36,7 @@ def test_settings_cell_exposes_only_the_judge_index():
     editable, _, fixed = settings.partition("Do NOT edit below this line.")
     assignments = re.findall(r"(?m)^([A-Z][A-Z0-9_]*) = ", editable)
     assert assignments == ["JUDGE_MODEL_INDEX"]
-    for const in ("JUDGE_QUANT = 'q8_0'", "LLM_QUANT = 'q8_0'", "N_SAMPLES = 30",
+    for const in ("JUDGE_QUANT = 'q4_K_M'", "LLM_QUANT = 'q8_0'", "N_SAMPLES = 30",
                   "GENERATOR_TAG = f'llama3.1:8b-instruct-{LLM_QUANT}'",
                   "OLLAMA_KV_CACHE_TYPE = 'q8_0'"):
         assert const in fixed

@@ -103,7 +103,7 @@ class TestConfig:
         for k in ("JUDGE_ENSEMBLE", "JUDGE_ENABLE_API_JUDGE", "JUDGE_MODEL_INDEX",
                   "JUDGE_OLLAMA_MODEL", "JUDGE_QUANT"):
             monkeypatch.delenv(k, raising=False)
-        assert judge_ensemble_specs() == [("ollama", "gemma2:9b-instruct-q8_0")]
+        assert judge_ensemble_specs() == [("ollama", "gemma2:9b-instruct-q4_K_M")]
 
     def test_api_judge_option_removed(self, monkeypatch):
         monkeypatch.delenv("JUDGE_ENSEMBLE", raising=False)

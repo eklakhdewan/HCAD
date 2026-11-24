@@ -215,7 +215,7 @@ Arms (one label each, used verbatim in JSON, tables and figures):
 Dense RAG (S-PubMedBERT, top-5), Hybrid BM25+Dense RAG (RRF, top-5), HCAD-RAG.
 Judges: selected by `JUDGE_MODEL_INDEX` (below), or an explicit
 (exactly one judge per run). The default judge is
-`ollama:gemma2:9b-instruct-q8_0`.
+`ollama:gemma2:9b-instruct-q4_K_M` (the judge is strictly 4-bit).
 Every call runs in JSON mode, and a judge failure never becomes a neutral
 fallback score.
 Outputs:
@@ -242,28 +242,28 @@ configured.
 `src/judge_models.py` is the single registry of judge models. Set an index
 and every judge call in `src/` follows, with no source edits:
 
-| `JUDGE_MODEL_INDEX` | Judge | `q8_0` tag | Size |
+| `JUDGE_MODEL_INDEX` | Judge | `q4_K_M` tag | Size |
 |---|---|---|---|
-| 0 | Qwen3-14B | `qwen3:14b-q8_0` | 16.0 GB |
-| 1 | DeepSeek-R1-Distill-Qwen-14B | `deepseek-r1:14b-qwen-distill-q8_0` | 16.0 GB |
-| 2 | Gemma 3 12B IT | `gemma3:12b-it-q8_0` | 13.0 GB |
-| 3 | Qwen2.5-14B-Instruct | `qwen2.5:14b-instruct-q8_0` | 16.0 GB |
-| 4 | Phi-4 14B | `phi4:14b-q8_0` | 16.0 GB |
-| 5 | Gemma 2 9B IT | `gemma2:9b-instruct-q8_0` | 9.8 GB |
+| 0 | Qwen3-14B | `qwen3:14b-q4_K_M` | 9.3 GB |
+| 1 | DeepSeek-R1-Distill-Qwen-14B | `deepseek-r1:14b-qwen-distill-q4_K_M` | 9.0 GB |
+| 2 | Gemma 3 12B IT | `gemma3:12b-it-q4_K_M` (or `gemma3:12b-it-qat`) | 8.2 GB (8.9 GB) |
+| 3 | Qwen2.5-14B-Instruct | `qwen2.5:14b-instruct-q4_K_M` | 9.0 GB |
+| 4 | Phi-4 14B | `phi4:14b-q4_K_M` | 9.1 GB |
+| 5 | Gemma 2 9B IT | `gemma2:9b-instruct-q4_K_M` | 5.8 GB |
 
 - `JUDGE_MODEL_INDEX=2` selects the judge. Exactly one judge scores a run; the
   table is a menu to swap from when a judge runs out of memory, not a panel.
   A list such as `0,3` is rejected, and so are the removed `JUDGE_ENSEMBLE` /
   `JUDGE_ENABLE_API_JUDGE` variables.
 - Precedence: `JUDGE_OLLAMA_MODEL` (exact tag) > `JUDGE_MODEL_INDEX` > default judge.
-- `JUDGE_QUANT` (default `q8_0`) picks the judge quantization; every model also
-  offers `q4_K_M` and `fp16`; some also offer `q3_K_M`, `q5_K_M`, `q6_K` or `qat`. An unknown index or quant fails
-  immediately with the menu.
-- **All LLMs are 8-bit by default**: the generator (`LLM_QUANT`, default `q8_0`)
-  and the judge (`JUDGE_QUANT`, default `q8_0`) use explicit tags rather than
-  Ollama's implicit default tag. On a T4 (15 GB) the 8-bit 14B judges (~16 GB)
-  are split over both GPUs and models are swapped one at a time; Gemma 2 9B
-  (index 5) fits next to the generator.
+- **The judge is strictly 4-bit.** `JUDGE_QUANT` (default `q4_K_M`) accepts only
+  `q4_K_M` (every model) or `qat` (Gemma 3, index 2). `q8_0`, `fp16` and other
+  precisions are rejected, and so is an explicit `JUDGE_OLLAMA_MODEL` tag that
+  does not end in a 4-bit suffix (`q4_*` / `qat`). An unknown index or quant
+  fails immediately with the menu.
+- The generator stays 8-bit (`LLM_QUANT`, default `q8_0`). Both use explicit
+  tags rather than Ollama's implicit default tag. Every 4-bit judge (~6-9 GB)
+  fits on a single T4 (15 GB); models are swapped one at a time.
 - Memory: judge calls send `num_ctx=8192`. Reasoning models (qwen3,
   deepseek-r1) get `think=False`, so chain-of-thought does not consume the
   token budget or break the JSON.
@@ -367,7 +367,7 @@ HCAD/
 ├── .gitignore                         # Git exclusion rules
 ├── src/
 │   ├── config.py                      # Global configurations, model weights & paths
-│   ├── judge_models.py                # Judge registry: index + quant -> exact ollama tag (8-bit default)
+│   ├── judge_models.py                # Judge registry: index + quant -> exact ollama tag (strictly 4-bit judge)
 │   ├── main.py                        # CLI entry point
 │   ├── wandb_tracking.py              # Shared W&B helpers (auto-enabled when configured)
 │   ├── api/

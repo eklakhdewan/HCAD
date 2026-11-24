@@ -377,7 +377,8 @@ LLM_PROVIDER = os.getenv("LLM_PROVIDER", "nvidia")  # "nvidia", "huggingface", o
 LLM_HF_MODEL = "meta-llama/Llama-3.1-8B-Instruct"
 JUDGE_HF_MODEL = "Qwen/Qwen2.5-72B-Instruct"  # Separate judge to avoid self-preference bias
 # Local (ollama) judge. Resolved from the registry in src/judge_models.py:
-#   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > gemma2:9b (q8_0).
+#   JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > gemma2:9b (q4_K_M).
+# The judge is STRICTLY 4-bit (q4_K_M / qat); non-4-bit tags raise.
 # The Kaggle notebook sets JUDGE_MODEL_INDEX; never edit tags here.
 from src.judge_models import resolve_judge_ollama_model as _resolve_judge
 
@@ -568,7 +569,7 @@ def decision_gate_enabled() -> bool:
 # menu in src/judge_models.py (JUDGE_MODEL_INDEX + JUDGE_QUANT). The menu
 # exists so a judge that runs out of memory can be swapped for another
 # index; there is no multi-judge consensus panel.
-# Default: Gemma 2 9B at 8-bit (registry index 5, ~9.8 GB).
+# Default: Gemma 2 9B at 4-bit (registry index 5, ~5.8 GB). Strictly 4-bit.
 # ---------------------------------------------------------------------------
 def judge_ensemble_specs() -> list[tuple[str, str]]:
     """The judge as [(provider, model)] - always exactly one entry.

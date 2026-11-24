@@ -5,7 +5,7 @@ else (src/config.py -> JUDGE_OLLAMA_MODEL -> UnifiedLLMClient ->
 BasePaperEvaluator) reads the resolved tag, so switching the judge never
 requires editing source files:
 
-    JUDGE_MODEL_INDEX=2 JUDGE_QUANT=q8_0 python src/main.py base-paper ...
+    JUDGE_MODEL_INDEX=2 JUDGE_QUANT=qat python src/main.py base-paper ...
 
 Exactly ONE judge scores a run. The registry is a menu of interchangeable
 judges, not a panel: if the selected judge does not fit in memory (OOM),
@@ -14,8 +14,11 @@ pick another index and re-run. A list of indices ("0,3") is rejected.
 Resolution (config.judge_ensemble_specs / config.JUDGE_OLLAMA_MODEL):
     JUDGE_OLLAMA_MODEL (exact tag) > JUDGE_MODEL_INDEX + JUDGE_QUANT > DEFAULT_JUDGE_TAG
 
-Default precision is 8-bit (q8_0) for the judge; the generator's precision
-is set separately by LLM_QUANT in src/config.py.
+The judge is STRICTLY 4-bit: the registry only lists 4-bit tags (q4_K_M,
+plus Gemma 3's quantization-aware 'qat'), and an explicit JUDGE_OLLAMA_MODEL
+tag must also be a 4-bit tag. Anything else (q8_0, fp16, an untagged
+default) raises. The generator's precision is set separately by LLM_QUANT
+in src/config.py.
 
 Kept dependency-free on purpose: the Kaggle notebook kernel imports it
 directly (different Python than the project env) to print the menu and
@@ -26,11 +29,17 @@ All tags below were verified against ollama.com/library/<model>/tags.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
-DEFAULT_QUANT = "q8_0"
-DEFAULT_JUDGE_TAG = "gemma2:9b-instruct-q8_0"  # registry index 5, smallest (~9.8 GB at 8-bit)
+DEFAULT_QUANT = "q4_K_M"
+DEFAULT_JUDGE_TAG = "gemma2:9b-instruct-q4_K_M"  # registry index 5, smallest (~5.8 GB at 4-bit)
+
+# The ONLY judge precisions allowed. Strict: no 8-bit / fp16 judge.
+ALLOWED_JUDGE_QUANTS = ("q4_K_M", "qat")
+# Suffixes that identify a 4-bit Ollama tag given verbatim via JUDGE_OLLAMA_MODEL.
+_FOUR_BIT_TAG = re.compile(r"[-:](q4_[0-9a-z_]+|qat)$", re.IGNORECASE)
 
 # Model families that emit chain-of-thought unless told not to. Thinking
 # tokens eat the judge's token budget and break JSON parsing, so the client
@@ -59,20 +68,16 @@ JUDGE_MODELS: List[JudgeModel] = [
         name="Qwen3-14B",
         quants={
             "q4_K_M": "qwen3:14b-q4_K_M",
-            "q8_0": "qwen3:14b-q8_0",
-            "fp16": "qwen3:14b-fp16",
         },
-        sizes_gb={"q4_K_M": 9.3, "q8_0": 16.0, "fp16": 30.0},
+        sizes_gb={"q4_K_M": 9.3},
         note="thinking disabled automatically",
     ),
     JudgeModel(  # 1
         name="DeepSeek-R1-Distill-Qwen-14B",
         quants={
             "q4_K_M": "deepseek-r1:14b-qwen-distill-q4_K_M",
-            "q8_0": "deepseek-r1:14b-qwen-distill-q8_0",
-            "fp16": "deepseek-r1:14b-qwen-distill-fp16",
         },
-        sizes_gb={"q4_K_M": 9.0, "q8_0": 16.0, "fp16": 30.0},
+        sizes_gb={"q4_K_M": 9.0},
         note="reasoning model; thinking disabled automatically",
     ),
     JudgeModel(  # 2
@@ -80,47 +85,31 @@ JUDGE_MODELS: List[JudgeModel] = [
         quants={
             "qat": "gemma3:12b-it-qat",
             "q4_K_M": "gemma3:12b-it-q4_K_M",
-            "q8_0": "gemma3:12b-it-q8_0",
-            "fp16": "gemma3:12b-it-fp16",
         },
-        sizes_gb={"qat": 8.9, "q4_K_M": 8.2, "q8_0": 13.0, "fp16": 24.0},
+        sizes_gb={"qat": 8.9, "q4_K_M": 8.2},
         note="'qat' = Google's quantization-aware 4-bit, best 4-bit quality",
     ),
     JudgeModel(  # 3
         name="Qwen2.5-14B-Instruct",
         quants={
-            "q3_K_M": "qwen2.5:14b-instruct-q3_K_M",
             "q4_K_M": "qwen2.5:14b-instruct-q4_K_M",
-            "q5_K_M": "qwen2.5:14b-instruct-q5_K_M",
-            "q6_K": "qwen2.5:14b-instruct-q6_K",
-            "q8_0": "qwen2.5:14b-instruct-q8_0",
-            "fp16": "qwen2.5:14b-instruct-fp16",
         },
-        sizes_gb={"q3_K_M": 7.3, "q4_K_M": 9.0, "q5_K_M": 11.0,
-                  "q6_K": 12.0, "q8_0": 16.0, "fp16": 30.0},
+        sizes_gb={"q4_K_M": 9.0},
         note="previous project default judge",
     ),
     JudgeModel(  # 4
         name="Phi-4 14B",
         quants={
             "q4_K_M": "phi4:14b-q4_K_M",
-            "q8_0": "phi4:14b-q8_0",
-            "fp16": "phi4:14b-fp16",
         },
-        sizes_gb={"q4_K_M": 9.1, "q8_0": 16.0, "fp16": 29.0},
+        sizes_gb={"q4_K_M": 9.1},
     ),
     JudgeModel(  # 5
         name="Gemma 2 9B IT",
         quants={
-            "q3_K_M": "gemma2:9b-instruct-q3_K_M",
             "q4_K_M": "gemma2:9b-instruct-q4_K_M",
-            "q5_K_M": "gemma2:9b-instruct-q5_K_M",
-            "q6_K": "gemma2:9b-instruct-q6_K",
-            "q8_0": "gemma2:9b-instruct-q8_0",
-            "fp16": "gemma2:9b-instruct-fp16",
         },
-        sizes_gb={"q3_K_M": 4.8, "q4_K_M": 5.8, "q5_K_M": 6.6,
-                  "q6_K": 7.6, "q8_0": 9.8, "fp16": 18.0},
+        sizes_gb={"q4_K_M": 5.8},
         note="smallest / fastest option",
     ),
 ]
@@ -137,9 +126,31 @@ def get_judge_model(index: int) -> JudgeModel:
     return JUDGE_MODELS[index]
 
 
+def check_judge_quant(quant: str) -> str:
+    """Reject any judge precision that is not 4-bit."""
+    quant = (quant or DEFAULT_QUANT).strip()
+    if quant not in ALLOWED_JUDGE_QUANTS:
+        raise ValueError(
+            f"JUDGE_QUANT={quant!r} is not allowed: the judge is strictly 4-bit. "
+            f"Choose one of {', '.join(ALLOWED_JUDGE_QUANTS)}."
+        )
+    return quant
+
+
+def check_4bit_tag(tag: str) -> str:
+    """Reject an explicit judge tag that is not a 4-bit Ollama tag."""
+    if not _FOUR_BIT_TAG.search(tag or ""):
+        raise ValueError(
+            f"JUDGE_OLLAMA_MODEL={tag!r} is not a 4-bit tag: the judge is strictly "
+            "4-bit. Use an explicit 4-bit tag (e.g. 'gemma2:9b-instruct-q4_K_M', "
+            "'gemma3:12b-it-qat') or set JUDGE_MODEL_INDEX instead."
+        )
+    return tag
+
+
 def resolve_judge_tag(index: int, quant: str = DEFAULT_QUANT) -> str:
-    """Exact Ollama tag for registry entry `index` at quantization `quant`."""
-    return get_judge_model(index).tag((quant or DEFAULT_QUANT).strip())
+    """Exact 4-bit Ollama tag for registry entry `index` at quantization `quant`."""
+    return check_4bit_tag(get_judge_model(index).tag(check_judge_quant(quant)))
 
 
 def _parse_index(raw: str) -> int:
@@ -194,7 +205,7 @@ def resolve_judge_ollama_model(env: Optional[Dict[str, str]] = None) -> str:
     env = os.environ if env is None else env
     explicit = (env.get("JUDGE_OLLAMA_MODEL") or "").strip()
     if explicit:
-        return explicit
+        return check_4bit_tag(explicit)
     tags = resolve_judge_tags(env)
     if tags:
         return tags[0]
